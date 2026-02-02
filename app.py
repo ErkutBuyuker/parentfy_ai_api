@@ -40,7 +40,7 @@ os.makedirs(FEEDBACK_DIR, exist_ok=True)
 #  MODEL, ENCODER, NORM YÜKLE
 # ===============================
 print("🔁 Model yükleniyor...")
-model = tf.keras.models.load_model(MODEL_PATH)
+model = tf.keras.models.load_model(MODEL_PATH, compile=False)
 print("✅ Model yüklendi:", MODEL_PATH)
 
 with open(ENCODER_PATH, "rb") as f:
