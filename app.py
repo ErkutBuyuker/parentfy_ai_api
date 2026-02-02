@@ -39,6 +39,23 @@ os.makedirs(FEEDBACK_DIR, exist_ok=True)
 # ===============================
 #  MODEL, ENCODER, NORM YÜKLE
 # ===============================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+MODEL_PATH = os.environ.get("MODEL_PATH", "baby_cry_model_crnn.h5")
+ENCODER_PATH = os.environ.get("ENCODER_PATH", "label_encoder_crnn.pkl")
+NORM_PATH = os.environ.get("NORM_PATH", "normalization_stats_crnn.pkl")
+
+# ✅ Tam path’e çevir (Render’da CWD bazen farklı olur)
+MODEL_PATH = os.path.join(BASE_DIR, MODEL_PATH) if not os.path.isabs(MODEL_PATH) else MODEL_PATH
+ENCODER_PATH = os.path.join(BASE_DIR, ENCODER_PATH) if not os.path.isabs(ENCODER_PATH) else ENCODER_PATH
+NORM_PATH = os.path.join(BASE_DIR, NORM_PATH) if not os.path.isabs(NORM_PATH) else NORM_PATH
+
+print("📌 CWD:", os.getcwd())
+print("📌 BASE_DIR:", BASE_DIR)
+print("📌 MODEL_PATH:", MODEL_PATH, "exists?", os.path.exists(MODEL_PATH))
+print("📌 ENCODER_PATH:", ENCODER_PATH, "exists?", os.path.exists(ENCODER_PATH))
+print("📌 NORM_PATH:", NORM_PATH, "exists?", os.path.exists(NORM_PATH))
+
 print("🔁 Model yükleniyor...")
 model = tf.keras.models.load_model(MODEL_PATH, compile=False)
 print("✅ Model yüklendi:", MODEL_PATH)
