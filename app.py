@@ -12,7 +12,7 @@ app = Flask(__name__)
 # ===============================
 #  MODEL / ENCODER / NORM DOSYA YOLLARI
 # ===============================
-MODEL_PATH = os.environ.get("MODEL_PATH", "baby_cry_best_crnn.keras")  # ✅ en iyi model
+MODEL_PATH = os.environ.get("MODEL_PATH", "baby_cry_model_crnn.h5") # ✅ en iyi model
 ENCODER_PATH = os.environ.get("ENCODER_PATH", "label_encoder_crnn.pkl")
 NORM_PATH = os.environ.get("NORM_PATH", "normalization_stats_crnn.pkl")
 
