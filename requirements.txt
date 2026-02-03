@@ -1,10 +1,17 @@
-Flask
-gunicorn
+Flask==3.0.2
+gunicorn==21.2.0
 
-numpy
-scikit-learn
-joblib
+# TF/Keras 3 uyumlu
+tensorflow==2.16.1
 
-librosa
-soundfile
-scipy
+# ML / audio
+numpy==1.26.4
+scipy==1.11.4
+scikit-learn==1.4.2
+joblib==1.4.2
+librosa==0.10.2.post1
+soundfile==0.12.1
+
+# model load yardımcıları
+h5py==3.10.0
+protobuf==4.25.3
