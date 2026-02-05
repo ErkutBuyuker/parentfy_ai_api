@@ -160,8 +160,13 @@ def check_audio_not_silent(file_path):
 # ===============================
 @app.route("/predict", methods=["POST"])
 def predict():
+    import time
+
+    print("🎯 /predict HIT - files:", list(request.files.keys()),
+          "form:", dict(request.form))
+
     if "audio" not in request.files:
-        return jsonify({"error": "Ses dosyası (audio) alanı gönderilmedi."}), 400
+        return jsonify({"error": "Ses dosyası (audio) alanı gönderilmedi."}), 4000
 
     audio_file = request.files["audio"]
 
