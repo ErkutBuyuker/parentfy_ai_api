@@ -166,7 +166,7 @@ def predict():
           "form:", dict(request.form))
 
     if "audio" not in request.files:
-        return jsonify({"error": "Ses dosyası (audio) alanı gönderilmedi."}), 4000
+        return jsonify({"error": "Ses dosyası (audio) alanı gönderilmedi."}), 400
 
     audio_file = request.files["audio"]
 
