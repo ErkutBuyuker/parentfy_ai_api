@@ -30,7 +30,7 @@ TARGET_TIME = 128  # zaman ekseninde 128 frame
 TARGET_LEN = HOP_LENGTH * (TARGET_TIME - 1) + N_FFT  # 33536 sample ≈ 2.1 sn
 
 # Çok sessiz kayıt eşiği (trainer’daki QUIET_THRESHOLD ile aynı mantık)
-QUIET_THRESHOLD = 0.01
+QUIET_THRESHOLD = 0.003
 
 # Kullanıcı feedback kayıtları için klasör
 FEEDBACK_DIR = "user_feedback"
@@ -108,8 +108,16 @@ def extract_mel_spectrogram(file_path):
     y, sr = librosa.load(file_path, sr=SAMPLE_RATE, mono=True)
 
     mean_amp = float(np.mean(np.abs(y)))
-    if mean_amp < QUIET_THRESHOLD:
+    rms = float(np.sqrt(np.mean(y**2))) if len(y) else 0.0
+    mx = float(np.max(np.abs(y))) if len(y) else 0.0
+    dur = float(len(y) / SAMPLE_RATE)
+
+    print("AUDIO_STATS:", {"dur": dur, "mean_abs": mean_amp, "rms": rms, "max": mx})
+
+# ✅ daha sağlam sessizlik kararı
+    if mx < 0.02 and rms < 0.01 and mean_amp < QUIET_THRESHOLD:
         raise ValueError("Ses çok sessiz veya boş görünüyor.")
+
 
     y = ensure_length(y, TARGET_LEN)
 
@@ -142,7 +150,9 @@ def check_audio_not_silent(file_path):
     except Exception:
         return False
     mean_amp = float(np.mean(np.abs(y)))
-    return mean_amp >= QUIET_THRESHOLD
+    rms = float(np.sqrt(np.mean(y**2))) if len(y) else 0.0
+    mx = float(np.max(np.abs(y))) if len(y) else 0.0
+    return not (mx < 0.02 and rms < 0.01 and mean_amp < QUIET_THRESHOLD)
 
 
 # ===============================
@@ -159,6 +169,11 @@ def predict():
     filename = f"temp_{uuid.uuid4().hex}.wav"
     audio_path = os.path.join("temp", filename)
     audio_file.save(audio_path)
+
+    try:
+        print("UPLOAD_BYTES:", os.path.getsize(audio_path), "path:", audio_path)
+    except Exception as e:
+        print("UPLOAD_BYTES_ERR:", e)
 
     try:
         mel = extract_mel_spectrogram(audio_path)      # (128, 128)
