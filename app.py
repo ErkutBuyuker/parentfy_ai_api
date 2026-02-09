@@ -1,3 +1,5 @@
+DEPLOY_MARK = "2026-02-09-NEW"
+
 from flask import Flask, request, jsonify
 import os
 import uuid
