@@ -117,7 +117,7 @@ def extract_mel_spectrogram(file_path):
 # 
 
 # ✅ 2) Normalize (Flutter kayıtlarında çok işe yarar)
-    if rms < 0.002:
+    if rms < 0.001:
         raise ValueError("Ses çok sessiz veya boş görünüyor.")
 
     y = ensure_length(y, TARGET_LEN)
@@ -191,7 +191,8 @@ def predict():
         mel, stats = extract_mel_spectrogram(audio_path)     # (128, 128)
         x = mel[np.newaxis, ..., np.newaxis]           # (1, 128, 128, 1)
 
-        preds = model.predict(x)[0]
+        preds = model.predict(x, verbose=0)[0]
+
         predicted_index = int(np.argmax(preds))
         predicted_label = le.inverse_transform([predicted_index])[0]
         confidence = float(np.max(preds))
