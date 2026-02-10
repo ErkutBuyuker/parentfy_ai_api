@@ -1,5 +1,3 @@
-DEPLOY_MARK = "2026-02-09-NEW"
-
 from flask import Flask, request, jsonify
 import os
 import uuid
@@ -8,7 +6,7 @@ import numpy as np
 import tensorflow as tf
 import pickle
 import json
-
+DEPLOY_MARK = "2026-02-09-NEW"
 app = Flask(__name__)
 
 # ===============================
@@ -116,10 +114,11 @@ def extract_mel_spectrogram(file_path):
 
     print("AUDIO_STATS:", {"dur": dur, "mean_abs": mean_amp, "rms": rms, "max": mx})
 
-# ✅ daha sağlam sessizlik kararı
-    if mx < 0.02 and rms < 0.01 and mean_amp < QUIET_THRESHOLD:
-        raise ValueError("Ses çok sessiz veya boş görünüyor.")
+# 
 
+# ✅ 2) Normalize (Flutter kayıtlarında çok işe yarar)
+    if rms < 0.002:
+        raise ValueError("Ses çok sessiz veya boş görünüyor.")
 
     y = ensure_length(y, TARGET_LEN)
 
@@ -142,7 +141,8 @@ def extract_mel_spectrogram(file_path):
 
     S_norm = (S_db - GLOBAL_MEAN) / GLOBAL_STD
 
-    return S_norm.astype(np.float32)  # (128, 128)
+    stats = {"dur": dur, "mean_abs": mean_amp, "rms": rms, "max": mx}
+    return S_norm.astype(np.float32), stats  # (128,128) + stats
 
 
 def check_audio_not_silent(file_path):
@@ -154,7 +154,7 @@ def check_audio_not_silent(file_path):
     mean_amp = float(np.mean(np.abs(y)))
     rms = float(np.sqrt(np.mean(y**2))) if len(y) else 0.0
     mx = float(np.max(np.abs(y))) if len(y) else 0.0
-    return not (mx < 0.02 and rms < 0.01 and mean_amp < QUIET_THRESHOLD)
+    return rms >= 0.002
 
 
 # ===============================
@@ -162,6 +162,8 @@ def check_audio_not_silent(file_path):
 # ===============================
 @app.route("/predict", methods=["POST"])
 def predict():
+    print("🔥 PREDICT ENTERED")  # en erken
+    print("HEADERS:", dict(request.headers))  # isteğin geldiğini kanıtlar
     import time
 
     print("🎯 /predict HIT - files:", list(request.files.keys()),
@@ -183,7 +185,10 @@ def predict():
         print("UPLOAD_BYTES_ERR:", e)
 
     try:
-        mel = extract_mel_spectrogram(audio_path)      # (128, 128)
+        import time
+        t0 = time.time()
+
+        mel, stats = extract_mel_spectrogram(audio_path)     # (128, 128)
         x = mel[np.newaxis, ..., np.newaxis]           # (1, 128, 128, 1)
 
         preds = model.predict(x)[0]
@@ -198,7 +203,7 @@ def predict():
                 "label": le.inverse_transform([i])[0],
                 "prob": float(preds[i])
             })
-
+        upload_bytes = os.path.getsize(audio_path)
         try:
             os.remove(audio_path)
         except Exception:
@@ -208,11 +213,17 @@ def predict():
         low_confidence = confidence < LOW_CONF_THRESHOLD
 
         return jsonify({
-            "label": predicted_label,
-            "confidence": confidence,
-            "low_confidence": low_confidence,
-            "top3": top3
-        })
+        "label": predicted_label,
+        "confidence": confidence,
+        "low_confidence": low_confidence,
+        "top3": top3,
+        "debug": {
+        "deploy": DEPLOY_MARK,
+        "upload_bytes": upload_bytes,
+        "audio_stats": stats,
+        "elapsed_ms": int((time.time() - t0) * 1000),
+       }
+      })
 
     except ValueError as ve:
         try:
@@ -301,7 +312,7 @@ def feedback():
 # ===============================
 @app.route("/", methods=["GET"])
 def home():
-    return "Parentfy AI Flask API çalışıyor. /predict için POST audio=... , /feedback için audio+label gönder."
+    return f"API running | {DEPLOY_MARK} | /predict (POST) | /feedback (POST)"
 
 
 # ===============================
