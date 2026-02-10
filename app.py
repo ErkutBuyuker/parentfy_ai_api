@@ -191,51 +191,47 @@ def check_audio_not_silent(file_path):
 # ===============================
 @app.route("/predict", methods=["POST"])
 def predict():
-    
     print("🔥 PREDICT ENTERED")
-    audio_path = None 
-    print("🔥 PREDICT ENTERED")  # en erken
-    print("HEADERS:", dict(request.headers))  # isteğin geldiğini kanıtlar
-    
+    print("HEADERS:", dict(request.headers))
+    print("🎯 /predict HIT - files:", list(request.files.keys()), "form:", dict(request.form))
 
-    print("🎯 /predict HIT - files:", list(request.files.keys()),
-          "form:", dict(request.form))
     t0 = time.time()
+    audio_path = None
+
     if "audio" not in request.files:
         return jsonify({"error": "Ses dosyası (audio) alanı gönderilmedi."}), 400
 
-    audio_file = request.files["audio"]
-
-    os.makedirs("temp", exist_ok=True)
-    filename = f"temp_{uuid.uuid4().hex}.wav"
-    audio_path = os.path.join("temp", filename)
-    audio_file.save(audio_path)
-    with open(audio_path, "rb") as f:
-       head4 = f.read(4)
-    print("WAV_HEAD:", head4)
-    if head4 != b'RIFF':
-        try: os.remove(audio_path)
-        except Exception: pass
-        return jsonify({"error": "Geçersiz WAV dosyası (RIFF header yok).", "code": "INVALID_WAV"}), 400
-
-
     try:
-        print("UPLOAD_BYTES:", os.path.getsize(audio_path), "path:", audio_path)
-    except Exception as e:
-        print("UPLOAD_BYTES_ERR:", e)
+        audio_file = request.files["audio"]
 
-    try:
+        os.makedirs("temp", exist_ok=True)
+        audio_path = os.path.join("temp", f"temp_{uuid.uuid4().hex}.wav")
+        audio_file.save(audio_path)
+
+        with open(audio_path, "rb") as f:
+            head4 = f.read(4)
+        print("WAV_HEAD:", head4)
+
+        if head4 != b"RIFF":
+            return jsonify({
+                "error": "Geçersiz WAV dosyası (RIFF header yok).",
+                "code": "INVALID_WAV"
+            }), 400
+
+        upload_bytes = os.path.getsize(audio_path)
+        print("UPLOAD_BYTES:", upload_bytes, "path:", audio_path)
+
         t_feat0 = time.time()
         mel, stats = extract_mel_spectrogram(audio_path)
-        print("STEP: feature_ms=", int((time.time() - t_feat0) * 1000), "ms")
-        print("STEP: after feature dt=", int((time.time() - t0) * 1000), "ms")
+        feature_ms = int((time.time() - t_feat0) * 1000)
+        print("STEP: feature_ms=", feature_ms, "ms")
 
         x = mel[np.newaxis, ..., np.newaxis]
 
         t_pred0 = time.time()
         preds = model.predict(x, verbose=0)[0]
-        print("STEP: predict_ms=", int((time.time() - t_pred0) * 1000), "ms")
-        print("STEP: after predict dt=", int((time.time() - t0) * 1000), "ms")
+        predict_ms = int((time.time() - t_pred0) * 1000)
+        print("STEP: predict_ms=", predict_ms, "ms")
 
         predicted_index = int(np.argmax(preds))
         predicted_label = le.inverse_transform([predicted_index])[0]
@@ -244,8 +240,8 @@ def predict():
         top3_idx = np.argsort(preds)[::-1][:3]
         top3 = [{"label": le.inverse_transform([i])[0], "prob": float(preds[i])} for i in top3_idx]
 
-        upload_bytes = os.path.getsize(audio_path)
         low_confidence = confidence < 0.5
+        elapsed_ms = int((time.time() - t0) * 1000)
 
         return jsonify({
             "label": predicted_label,
@@ -253,24 +249,28 @@ def predict():
             "low_confidence": low_confidence,
             "top3": top3,
             "debug": {
-            "deploy": DEPLOY_MARK,
-                 "upload_bytes": upload_bytes,
-                 "audio_stats": stats,
-                 "elapsed_ms": int((time.time() - t0) * 1000),
-        }
-    })
+                "deploy": DEPLOY_MARK,
+                "upload_bytes": upload_bytes,
+                "audio_stats": stats,
+                "feature_ms": feature_ms,
+                "predict_ms": predict_ms,
+                "elapsed_ms": elapsed_ms
+            }
+        })
 
     except ValueError as ve:
         return jsonify({"error": str(ve), "code": "AUDIO_TOO_SILENT"}), 400
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
     finally:
         try:
             if audio_path and os.path.exists(audio_path):
-             os.remove(audio_path)
+                os.remove(audio_path)
         except Exception:
             pass
+
 
     
 
