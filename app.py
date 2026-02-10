@@ -178,6 +178,14 @@ def predict():
     filename = f"temp_{uuid.uuid4().hex}.wav"
     audio_path = os.path.join("temp", filename)
     audio_file.save(audio_path)
+    with open(audio_path, "rb") as f:
+       head4 = f.read(4)
+    print("WAV_HEAD:", head4)
+    if head4 != b'RIFF':
+        try: os.remove(audio_path)
+        except Exception: pass
+        return jsonify({"error": "Geçersiz WAV dosyası (RIFF header yok).", "code": "INVALID_WAV"}), 400
+
 
     try:
         print("UPLOAD_BYTES:", os.path.getsize(audio_path), "path:", audio_path)
