@@ -6,6 +6,10 @@ import numpy as np
 import tensorflow as tf
 import pickle
 import json
+import time
+import soundfile as sf
+import psutil
+
 DEPLOY_MARK = "2026-02-09-NEW"
 app = Flask(__name__)
 
@@ -100,28 +104,43 @@ def ensure_length(y, target_len=TARGET_LEN):
 # ===============================
 def extract_mel_spectrogram(file_path):
     """
-    - 16 kHz mono yükler
-    - Sessizlik kontrolü (çok sessizse hata atar)
+    - WAV'ı soundfile ile hızlı okur (sr=None mantığı)
+    - Stereo ise mono yapar
+    - SR farklıysa sadece o zaman resample eder
     - TARGET_LEN'e pad/truncate (~2.1 sn)
     - Log-Mel + global mean/std normalizasyon
     """
-    y, sr = librosa.load(file_path, sr=SAMPLE_RATE, mono=True)
 
+    # ✅ 1) Hızlı ve düşük RAM: soundfile ile oku
+    y, sr = sf.read(file_path, dtype="float32", always_2d=False)
+
+    if y is None or len(y) == 0:
+        raise ValueError("Ses boş görünüyor.")
+
+    # ✅ 2) Stereo -> mono
+    if isinstance(y, np.ndarray) and y.ndim > 1:
+        y = np.mean(y, axis=1).astype(np.float32)
+
+    # ✅ 3) Flutter genelde 16k gönderir; sadece farklıysa resample
+    sr = int(sr)
+    if sr != SAMPLE_RATE:
+        y = librosa.resample(y, orig_sr=sr, target_sr=SAMPLE_RATE)
+
+    # ✅ 4) Sessizlik kontrolü
     mean_amp = float(np.mean(np.abs(y)))
     rms = float(np.sqrt(np.mean(y**2))) if len(y) else 0.0
     mx = float(np.max(np.abs(y))) if len(y) else 0.0
     dur = float(len(y) / SAMPLE_RATE)
 
-    print("AUDIO_STATS:", {"dur": dur, "mean_abs": mean_amp, "rms": rms, "max": mx})
+    print("AUDIO_STATS:", {"dur": dur, "sr": int(sr), "mean_abs": mean_amp, "rms": rms, "max": mx})
 
-# 
-
-# ✅ 2) Normalize (Flutter kayıtlarında çok işe yarar)
     if rms < 0.001:
         raise ValueError("Ses çok sessiz veya boş görünüyor.")
 
+    # ✅ 5) Trainer ile aynı uzunluğa getir
     y = ensure_length(y, TARGET_LEN)
 
+    # ✅ 6) Mel Spectrogram
     S = librosa.feature.melspectrogram(
         y=y,
         sr=SAMPLE_RATE,
@@ -131,24 +150,34 @@ def extract_mel_spectrogram(file_path):
         power=2.0,
     )
 
-    S_db = librosa.power_to_db(S, ref=np.max)
+    S_db = librosa.power_to_db(S, ref=np.max).astype(np.float32)
 
+    # ✅ 7) Zaman eksenini 128 frame'e sabitle
     if S_db.shape[1] < TARGET_TIME:
         pad_width = TARGET_TIME - S_db.shape[1]
         S_db = np.pad(S_db, ((0, 0), (0, pad_width)), mode="constant")
     elif S_db.shape[1] > TARGET_TIME:
         S_db = S_db[:, :TARGET_TIME]
 
+    # ✅ 8) Global normalizasyon
     S_norm = (S_db - GLOBAL_MEAN) / GLOBAL_STD
 
-    stats = {"dur": dur, "mean_abs": mean_amp, "rms": rms, "max": mx}
-    return S_norm.astype(np.float32), stats  # (128,128) + stats
+    stats = {"dur": dur, "sr": int(sr), "mean_abs": mean_amp, "rms": rms, "max": mx}
+    return S_norm.astype(np.float32), stats
+
 
 
 def check_audio_not_silent(file_path):
     """Feedback için sessizlik kontrolü."""
     try:
-        y, sr = librosa.load(file_path, sr=SAMPLE_RATE, mono=True)
+        y, sr = sf.read(file_path, dtype="float32", always_2d=False)
+        if y is None or len(y) == 0:
+           return False
+        if isinstance(y, np.ndarray) and y.ndim > 1:
+           y = np.mean(y, axis=1).astype(np.float32)
+        if sr != SAMPLE_RATE:
+           y = librosa.resample(y, orig_sr=sr, target_sr=SAMPLE_RATE)
+
     except Exception:
         return False
     mean_amp = float(np.mean(np.abs(y)))
@@ -162,13 +191,16 @@ def check_audio_not_silent(file_path):
 # ===============================
 @app.route("/predict", methods=["POST"])
 def predict():
+    
+    print("🔥 PREDICT ENTERED")
+    audio_path = None 
     print("🔥 PREDICT ENTERED")  # en erken
     print("HEADERS:", dict(request.headers))  # isteğin geldiğini kanıtlar
-    import time
+    
 
     print("🎯 /predict HIT - files:", list(request.files.keys()),
           "form:", dict(request.form))
-
+    t0 = time.time()
     if "audio" not in request.files:
         return jsonify({"error": "Ses dosyası (audio) alanı gönderilmedi."}), 400
 
@@ -193,60 +225,54 @@ def predict():
         print("UPLOAD_BYTES_ERR:", e)
 
     try:
-        import time
-        t0 = time.time()
+        t_feat0 = time.time()
+        mel, stats = extract_mel_spectrogram(audio_path)
+        print("STEP: feature_ms=", int((time.time() - t_feat0) * 1000), "ms")
+        print("STEP: after feature dt=", int((time.time() - t0) * 1000), "ms")
 
-        mel, stats = extract_mel_spectrogram(audio_path)     # (128, 128)
-        x = mel[np.newaxis, ..., np.newaxis]           # (1, 128, 128, 1)
+        x = mel[np.newaxis, ..., np.newaxis]
 
+        t_pred0 = time.time()
         preds = model.predict(x, verbose=0)[0]
+        print("STEP: predict_ms=", int((time.time() - t_pred0) * 1000), "ms")
+        print("STEP: after predict dt=", int((time.time() - t0) * 1000), "ms")
 
         predicted_index = int(np.argmax(preds))
         predicted_label = le.inverse_transform([predicted_index])[0]
         confidence = float(np.max(preds))
 
         top3_idx = np.argsort(preds)[::-1][:3]
-        top3 = []
-        for i in top3_idx:
-            top3.append({
-                "label": le.inverse_transform([i])[0],
-                "prob": float(preds[i])
-            })
-        upload_bytes = os.path.getsize(audio_path)
-        try:
-            os.remove(audio_path)
-        except Exception:
-            pass
+        top3 = [{"label": le.inverse_transform([i])[0], "prob": float(preds[i])} for i in top3_idx]
 
-        LOW_CONF_THRESHOLD = 0.5
-        low_confidence = confidence < LOW_CONF_THRESHOLD
+        upload_bytes = os.path.getsize(audio_path)
+        low_confidence = confidence < 0.5
 
         return jsonify({
-        "label": predicted_label,
-        "confidence": confidence,
-        "low_confidence": low_confidence,
-        "top3": top3,
-        "debug": {
-        "deploy": DEPLOY_MARK,
-        "upload_bytes": upload_bytes,
-        "audio_stats": stats,
-        "elapsed_ms": int((time.time() - t0) * 1000),
-       }
-      })
+            "label": predicted_label,
+            "confidence": confidence,
+            "low_confidence": low_confidence,
+            "top3": top3,
+            "debug": {
+            "deploy": DEPLOY_MARK,
+                 "upload_bytes": upload_bytes,
+                 "audio_stats": stats,
+                 "elapsed_ms": int((time.time() - t0) * 1000),
+        }
+    })
 
     except ValueError as ve:
-        try:
-            os.remove(audio_path)
-        except Exception:
-            pass
         return jsonify({"error": str(ve), "code": "AUDIO_TOO_SILENT"}), 400
 
     except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
         try:
-            os.remove(audio_path)
+            if audio_path and os.path.exists(audio_path):
+             os.remove(audio_path)
         except Exception:
             pass
-        return jsonify({"error": str(e)}), 500
+
+    
 
 
 # ===============================
