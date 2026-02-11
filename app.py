@@ -232,7 +232,7 @@ def cry_gate_stats(y: np.ndarray, sr: int) -> dict:
     y = y - np.mean(y)  # DC offset azalt
     abs_y = np.abs(y)
 
-    rms = float(np.sqrt(np.mean(y*y))) if len(y) else 0.0
+    rms = float(np.sqrt(np.mean(y * y))) if len(y) else 0.0
     mean_abs = float(np.mean(abs_y)) if len(y) else 0.0
     mx = float(np.max(abs_y)) if len(y) else 0.0
 
@@ -246,37 +246,65 @@ def cry_gate_stats(y: np.ndarray, sr: int) -> dict:
     zc = np.mean(np.abs(np.diff(np.sign(y))) > 0) if len(y) > 1 else 0.0
     zcr = float(zc)
 
+    # non-silent ratio (frame rms > threshold)
+    thr = max(0.004, 0.25 * rms)  # adaptif + minimum eşik
+    non_silent_ratio = float(np.mean(fr > thr)) if len(fr) else 0.0
+
+    # peak-to-rms (transient kontrolü)
+    peak_to_rms = float(mx / (rms + 1e-9))
+
     return {
         "rms": rms,
         "mean_abs": mean_abs,
         "max": mx,
         "dynamic_ratio": dynamic_ratio,
         "zcr": zcr,
+        "non_silent_ratio": non_silent_ratio,
+        "peak_to_rms": peak_to_rms,
         "sr": int(sr),
         "dur": float(len(y) / sr) if sr else 0.0,
     }
 
-def is_baby_cry_like(g: dict) -> (bool, str):
-    """
-    Başlangıç kuralları (sahada ayarlanacak):
-    - Silence: çok düşük RMS → no_cry
-    - Çok steady/tonal: dynamic_ratio düşük + zcr düşük → no_cry (konuşma/aaaa gibi)
-    - Aksi durumda: model çalışsın
-    """
+
+def is_baby_cry_like(g: dict) -> (bool, str, float):
     rms = g["rms"]
     dyn = g["dynamic_ratio"]
     zcr = g["zcr"]
+    nsr = g.get("non_silent_ratio", 0.0)
+    ptr = g.get("peak_to_rms", 0.0)
 
-    # 1) Sessizlik / arka plan
+    if g.get("dur", 0.0) < 0.4:
+        return False, "TOO_SHORT", 0.0
+
     if rms < 0.006:
-        return False, "SILENCE_GATE"
+        return False, "SILENCE_GATE", 0.0
 
-    # 2) Çok steady/tonal ses (aaaa, konuşma uzatması, bazı müzik)
-    # Bebek ağlaması genelde daha dalgalı (dyn daha yüksek)
+    if nsr < 0.18:
+        return False, "SPARSE_AUDIO", 0.10
+
+    if ptr > 18.0 and dyn < 1.6:
+        return False, "TRANSIENT_AUDIO", 0.15
+
     if dyn < 1.25 and zcr < 0.06:
-        return False, "TONAL_STEADY_GATE"
+        return False, "TONAL_STEADY_GATE", 0.20
 
-    return True, "PASS"
+    score = 0.0
+    if nsr >= 0.35: score += 0.35
+    elif nsr >= 0.25: score += 0.20
+
+    if dyn >= 1.8: score += 0.35
+    elif dyn >= 1.5: score += 0.20
+
+    if 0.06 <= zcr <= 0.18: score += 0.20
+    elif 0.04 <= zcr <= 0.22: score += 0.10
+
+    if 3.0 <= ptr <= 15.0: score += 0.10
+
+    if score < 0.55:
+        return False, "LOW_CRY_CONF", float(score)
+
+    return True, "PASS", float(score)
+
 
 
 # ===============================
@@ -331,13 +359,16 @@ def predict():
             sr_gate = SAMPLE_RATE
 
         g = cry_gate_stats(y_gate, sr_gate)
-        ok, reason = is_baby_cry_like(g)
+        ok, reason, cry_conf = is_baby_cry_like(g)
+        g["cry_confidence"] = cry_conf
+
 
 
         if not ok:
             return jsonify({
                 "label": "no_cry",
-                "confidence": 1.0,
+                "confidence": float(max(0.01, min(cry_conf, 1.0))),
+
                 "code": reason,
                 "debug": {"gate": g, "deploy": DEPLOY_MARK, "upload_bytes": upload_bytes}
             }), 200
