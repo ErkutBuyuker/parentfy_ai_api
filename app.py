@@ -8,6 +8,8 @@ import pickle
 import json
 import time
 import soundfile as sf
+import traceback
+
 try:
     import psutil
 except Exception:
@@ -72,7 +74,9 @@ print("📌 NORM exists?", os.path.exists(NORM_PATH))
 
 
 print("🔁 Model yükleniyor...")
-model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+keras_model = tf.keras.models.load_model(MODEL_PATH, compile=False)
+print("✅ keras_model type:", type(keras_model), flush=True)
+print("✅ keras_model has predict?", hasattr(keras_model, "predict"), flush=True)
 print("✅ Model yüklendi:", MODEL_PATH)
 
 with open(ENCODER_PATH, "rb") as f:
@@ -194,9 +198,12 @@ def check_audio_not_silent(file_path):
 # ===============================
 @app.route("/predict", methods=["POST"])
 def predict():
-    print("🔥 PREDICT ENTERED")
-    print("HEADERS:", dict(request.headers))
-    print("🎯 /predict HIT - files:", list(request.files.keys()), "form:", dict(request.form))
+    print("🔥 PREDICT ENTERED", flush=True)
+    print("HEADERS:", dict(request.headers), flush=True)
+    print("🎯 /predict HIT - files:", list(request.files.keys()), "form:", dict(request.form), flush=True)
+
+    print("MODEL TYPE (runtime):", type(keras_model), flush=True)
+    print("MODEL HAS PREDICT:", hasattr(keras_model, "predict"), flush=True)
 
     t0 = time.time()
     audio_path = None
@@ -232,7 +239,7 @@ def predict():
         x = mel[np.newaxis, ..., np.newaxis]
 
         t_pred0 = time.time()
-        preds = model.predict(x, verbose=0)[0]
+        preds = keras_model.predict(x, verbose=0)[0]
         predict_ms = int((time.time() - t_pred0) * 1000)
         print("STEP: predict_ms=", predict_ms, "ms")
 
@@ -265,7 +272,7 @@ def predict():
         return jsonify({"error": str(ve), "code": "AUDIO_TOO_SILENT"}), 400
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 
     finally:
         try:
