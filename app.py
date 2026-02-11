@@ -107,7 +107,6 @@ def ensure_length(y, target_len=TARGET_LEN):
         y = y[:target_len]
     return y
 
-
 # ===============================
 #  MEL-SPEKTROGRAM + GLOBAL NORMALİZASYON
 # ===============================
@@ -148,8 +147,6 @@ def extract_mel_spectrogram(file_path):
 
     print("AUDIO_STATS:", {"dur": dur, "sr": int(sr), "mean_abs": mean_amp, "rms": rms, "max": mx}, flush=True)
 
-    if rms < 0.001:
-        raise ValueError("Ses çok sessiz veya boş görünüyor.")
 
     # trainer ile aynı uzunluk
     y = ensure_length(y, TARGET_LEN)
@@ -217,6 +214,69 @@ def check_audio_not_silent(file_path):
     rms = float(np.sqrt(np.mean(y**2))) if len(y) else 0.0
     return rms >= 0.002
 
+def _frame_rms(y: np.ndarray, frame: int = 512, hop: int = 256) -> np.ndarray:
+    y = y.astype(np.float32)
+    if len(y) < frame:
+        return np.array([float(np.sqrt(np.mean(y**2)))], dtype=np.float32)
+    n = 1 + (len(y) - frame) // hop
+    rms = np.zeros(n, dtype=np.float32)
+    for i in range(n):
+        s = i * hop
+        w = y[s:s+frame]
+        rms[i] = float(np.sqrt(np.mean(w*w)))
+    return rms
+
+def cry_gate_stats(y: np.ndarray, sr: int) -> dict:
+    # Basit, hızlı istatistikler
+    y = y.astype(np.float32)
+    y = y - np.mean(y)  # DC offset azalt
+    abs_y = np.abs(y)
+
+    rms = float(np.sqrt(np.mean(y*y))) if len(y) else 0.0
+    mean_abs = float(np.mean(abs_y)) if len(y) else 0.0
+    mx = float(np.max(abs_y)) if len(y) else 0.0
+
+    # Dinamik (bebek ağlaması dalgalı; steady “aaaa” daha stabil)
+    fr = _frame_rms(y, frame=512, hop=256)
+    rms_med = float(np.median(fr)) if len(fr) else rms
+    rms_p95 = float(np.percentile(fr, 95)) if len(fr) else rms
+    dynamic_ratio = float((rms_p95 + 1e-9) / (rms_med + 1e-9))
+
+    # Zero Crossing Rate (tonal vs daha karmaşık)
+    zc = np.mean(np.abs(np.diff(np.sign(y))) > 0) if len(y) > 1 else 0.0
+    zcr = float(zc)
+
+    return {
+        "rms": rms,
+        "mean_abs": mean_abs,
+        "max": mx,
+        "dynamic_ratio": dynamic_ratio,
+        "zcr": zcr,
+        "sr": int(sr),
+        "dur": float(len(y) / sr) if sr else 0.0,
+    }
+
+def is_baby_cry_like(g: dict) -> (bool, str):
+    """
+    Başlangıç kuralları (sahada ayarlanacak):
+    - Silence: çok düşük RMS → no_cry
+    - Çok steady/tonal: dynamic_ratio düşük + zcr düşük → no_cry (konuşma/aaaa gibi)
+    - Aksi durumda: model çalışsın
+    """
+    rms = g["rms"]
+    dyn = g["dynamic_ratio"]
+    zcr = g["zcr"]
+
+    # 1) Sessizlik / arka plan
+    if rms < 0.006:
+        return False, "SILENCE_GATE"
+
+    # 2) Çok steady/tonal ses (aaaa, konuşma uzatması, bazı müzik)
+    # Bebek ağlaması genelde daha dalgalı (dyn daha yüksek)
+    if dyn < 1.25 and zcr < 0.06:
+        return False, "TONAL_STEADY_GATE"
+
+    return True, "PASS"
 
 
 # ===============================
@@ -256,6 +316,31 @@ def predict():
 
         upload_bytes = os.path.getsize(audio_path)
         print("UPLOAD_BYTES:", upload_bytes, "path:", audio_path)
+        
+        y_gate, sr_gate = sf.read(audio_path, dtype="float32", always_2d=False)
+        if isinstance(y_gate, np.ndarray) and y_gate.ndim > 1:
+            y_gate = np.mean(y_gate, axis=1).astype(np.float32)
+        sr_gate = int(sr_gate)
+
+        # ✅ SR normalize (gate için)
+        if sr_gate != SAMPLE_RATE:
+            y_tf = tf.convert_to_tensor(y_gate, dtype=tf.float32)
+            new_len = int(len(y_gate) * (SAMPLE_RATE / sr_gate))
+            y_tf = tf.signal.resample(y_tf, new_len)
+            y_gate = y_tf.numpy().astype(np.float32)
+            sr_gate = SAMPLE_RATE
+
+        g = cry_gate_stats(y_gate, sr_gate)
+        ok, reason = is_baby_cry_like(g)
+
+
+        if not ok:
+            return jsonify({
+                "label": "no_cry",
+                "confidence": 1.0,
+                "code": reason,
+                "debug": {"gate": g, "deploy": DEPLOY_MARK, "upload_bytes": upload_bytes}
+            }), 200
 
         t_feat0 = time.time()
         mel, stats = extract_mel_spectrogram(audio_path)
