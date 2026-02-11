@@ -1,7 +1,9 @@
+print("APP.PY LOADED FROM NEW VERSION - NO LIBROSA")
+
 from flask import Flask, request, jsonify
 import os
 import uuid
-import librosa
+
 import numpy as np
 import tensorflow as tf
 import pickle
@@ -111,86 +113,110 @@ def ensure_length(y, target_len=TARGET_LEN):
 # ===============================
 def extract_mel_spectrogram(file_path):
     """
-    - WAV'ı soundfile ile hızlı okur (sr=None mantığı)
-    - Stereo ise mono yapar
-    - SR farklıysa sadece o zaman resample eder
-    - TARGET_LEN'e pad/truncate (~2.1 sn)
-    - Log-Mel + global mean/std normalizasyon
+    - soundfile ile oku (zaten sende var)
+    - mono + sr kontrol
+    - TARGET_LEN pad/truncate
+    - TF ile STFT -> Mel filter -> log -> dB benzeri ölçek
+    - time axis 128 frame
+    - global mean/std normalize
     """
-
-    # ✅ 1) Hızlı ve düşük RAM: soundfile ile oku
     y, sr = sf.read(file_path, dtype="float32", always_2d=False)
 
     if y is None or len(y) == 0:
         raise ValueError("Ses boş görünüyor.")
 
-    # ✅ 2) Stereo -> mono
+    # stereo -> mono
     if isinstance(y, np.ndarray) and y.ndim > 1:
         y = np.mean(y, axis=1).astype(np.float32)
 
-    # ✅ 3) Flutter genelde 16k gönderir; sadece farklıysa resample
     sr = int(sr)
-    if sr != SAMPLE_RATE:
-        y = librosa.resample(y, orig_sr=sr, target_sr=SAMPLE_RATE)
 
-    # ✅ 4) Sessizlik kontrolü
+    # SR farklıysa (nadir) - TF resample (basit)
+    if sr != SAMPLE_RATE:
+        # tf.signal.resample: zaman domeninde yeniden örnekleme
+        y_tf = tf.convert_to_tensor(y, dtype=tf.float32)
+        new_len = int(len(y) * (SAMPLE_RATE / sr))
+        y_tf = tf.signal.resample(y_tf, new_len)
+        y = y_tf.numpy().astype(np.float32)
+        sr = SAMPLE_RATE
+
+    # sessizlik kontrol
     mean_amp = float(np.mean(np.abs(y)))
     rms = float(np.sqrt(np.mean(y**2))) if len(y) else 0.0
     mx = float(np.max(np.abs(y))) if len(y) else 0.0
     dur = float(len(y) / SAMPLE_RATE)
 
-    print("AUDIO_STATS:", {"dur": dur, "sr": int(sr), "mean_abs": mean_amp, "rms": rms, "max": mx})
+    print("AUDIO_STATS:", {"dur": dur, "sr": int(sr), "mean_abs": mean_amp, "rms": rms, "max": mx}, flush=True)
 
     if rms < 0.001:
         raise ValueError("Ses çok sessiz veya boş görünüyor.")
 
-    # ✅ 5) Trainer ile aynı uzunluğa getir
+    # trainer ile aynı uzunluk
     y = ensure_length(y, TARGET_LEN)
 
-    # ✅ 6) Mel Spectrogram
-    S = librosa.feature.melspectrogram(
-        y=y,
-        sr=SAMPLE_RATE,
-        n_fft=N_FFT,
-        hop_length=HOP_LENGTH,
-        n_mels=N_MELS,
-        power=2.0,
+    # ===== TF Mel Spectrogram =====
+    y_tf = tf.convert_to_tensor(y, dtype=tf.float32)
+
+    stft = tf.signal.stft(
+        y_tf,
+        frame_length=N_FFT,
+        frame_step=HOP_LENGTH,
+        fft_length=N_FFT,
+        window_fn=tf.signal.hann_window,
+        pad_end=False,
+    )  # [time, freq]
+
+    spec = tf.abs(stft) ** 2  # power spectrogram
+
+    mel_w = tf.signal.linear_to_mel_weight_matrix(
+        num_mel_bins=N_MELS,
+        num_spectrogram_bins=spec.shape[-1],
+        sample_rate=SAMPLE_RATE,
+        lower_edge_hertz=0.0,
+        upper_edge_hertz=SAMPLE_RATE / 2.0,
     )
 
-    S_db = librosa.power_to_db(S, ref=np.max).astype(np.float32)
+    mel_spec = tf.matmul(spec, mel_w)  # [time, mels]
+    mel_spec = tf.transpose(mel_spec, perm=[1, 0])  # [mels, time] (librosa ile aynı yön)
 
-    # ✅ 7) Zaman eksenini 128 frame'e sabitle
+    # log ölçeği (power_to_db benzeri)
+    mel_spec = tf.maximum(mel_spec, 1e-10)
+    log_mel = 10.0 * (tf.math.log(mel_spec) / tf.math.log(10.0))  # log10
+
+    S_db = log_mel.numpy().astype(np.float32)
+
+    # time axis 128 frame
     if S_db.shape[1] < TARGET_TIME:
         pad_width = TARGET_TIME - S_db.shape[1]
         S_db = np.pad(S_db, ((0, 0), (0, pad_width)), mode="constant")
     elif S_db.shape[1] > TARGET_TIME:
         S_db = S_db[:, :TARGET_TIME]
 
-    # ✅ 8) Global normalizasyon
+    # global normalization
     S_norm = (S_db - GLOBAL_MEAN) / GLOBAL_STD
 
     stats = {"dur": dur, "sr": int(sr), "mean_abs": mean_amp, "rms": rms, "max": mx}
     return S_norm.astype(np.float32), stats
 
 
-
 def check_audio_not_silent(file_path):
-    """Feedback için sessizlik kontrolü."""
     try:
         y, sr = sf.read(file_path, dtype="float32", always_2d=False)
         if y is None or len(y) == 0:
-           return False
+            return False
         if isinstance(y, np.ndarray) and y.ndim > 1:
-           y = np.mean(y, axis=1).astype(np.float32)
+            y = np.mean(y, axis=1).astype(np.float32)
+
+        sr = int(sr)
         if sr != SAMPLE_RATE:
-           y = librosa.resample(y, orig_sr=sr, target_sr=SAMPLE_RATE)
+            return False  # şimdilik (Flutter 16k olduğu için sorun olmaz)
 
     except Exception:
         return False
-    mean_amp = float(np.mean(np.abs(y)))
+
     rms = float(np.sqrt(np.mean(y**2))) if len(y) else 0.0
-    mx = float(np.max(np.abs(y))) if len(y) else 0.0
     return rms >= 0.002
+
 
 
 # ===============================
