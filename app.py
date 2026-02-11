@@ -17,7 +17,7 @@ try:
 except Exception:
     psutil = None
 
-DEPLOY_MARK = "2026-02-09-NEW"
+DEPLOY_MARK = "2026-02-12-BESTWIN"
 app = Flask(__name__)
 
 # ===============================
@@ -94,6 +94,28 @@ print("✅ Normalizasyon istatistikleri yüklendi:", NORM_PATH)
 ALLOWED_LABELS = set(le.classes_)
 print("🔤 Desteklenen sınıflar:", ALLOWED_LABELS)
 
+def pick_best_window(y: np.ndarray, win_len: int, hop: int = 1024) -> np.ndarray:
+    """
+    Uzun kayıtta (örn 6sn) en yüksek RMS'li win_len (TARGET_LEN) segmentini seçer.
+    Böylece ağlama geç başlasa bile yakalanır.
+    """
+    y = y.astype(np.float32)
+    if len(y) <= win_len:
+        return y
+
+    best_i = 0
+    best_rms = -1.0
+
+    for i in range(0, len(y) - win_len + 1, hop):
+        seg = y[i:i + win_len]
+        rms = float(np.sqrt(np.mean(seg * seg)) + 1e-9)
+        if rms > best_rms:
+            best_rms = rms
+            best_i = i
+    print(f"PICK_BEST_WINDOW: best_i={best_i} best_rms={best_rms:.6f} len={len(y)} win_len={win_len} hop={hop}", flush=True)
+
+
+    return y[best_i:best_i + win_len]
 
 # ===============================
 #  HELPER: WAVEFORM UZUNLUĞUNU TRAINER İLE AYNI YAP
@@ -148,8 +170,11 @@ def extract_mel_spectrogram(file_path):
     print("AUDIO_STATS:", {"dur": dur, "sr": int(sr), "mean_abs": mean_amp, "rms": rms, "max": mx}, flush=True)
 
 
-    # trainer ile aynı uzunluk
+    y = pick_best_window(y, TARGET_LEN, hop=1024)
+
+   
     y = ensure_length(y, TARGET_LEN)
+
 
     # ===== TF Mel Spectrogram =====
     y_tf = tf.convert_to_tensor(y, dtype=tf.float32)
@@ -404,6 +429,7 @@ def predict():
                 "deploy": DEPLOY_MARK,
                 "upload_bytes": upload_bytes,
                 "audio_stats": stats,
+                "gate": g,
                 "feature_ms": feature_ms,
                 "predict_ms": predict_ms,
                 "elapsed_ms": elapsed_ms
