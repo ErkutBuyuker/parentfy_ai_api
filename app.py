@@ -8,7 +8,10 @@ import pickle
 import json
 import time
 import soundfile as sf
-import psutil
+try:
+    import psutil
+except Exception:
+    psutil = None
 
 DEPLOY_MARK = "2026-02-09-NEW"
 app = Flask(__name__)
